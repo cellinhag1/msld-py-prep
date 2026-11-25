@@ -341,12 +341,14 @@ def MsldCRN(mcsout,outdir,inFrag,AnCore,ChkQChange=True,verbose=False,debug=Fals
     for site in range(nsites):
         sitesum=[]
         Qfrag.append([])
+        fragmol=[]  # [pyprep_update] molecule each fragment comes from
         for frag in range(len(frags[site])):
             # collect all the charges into Qfrag (list of lists of Series of frag atom charges)
             Qfrag[site].append(pd.Series(np.zeros(len(Fatoms[site][frag])),index=Fatoms[site][frag]))
             for mol in range(len(mols)):
                 if mols[mol] == frags[site][frag]:
                     break
+            fragmol.append(mol)
             for at in Fatoms[site][frag]:
                 Qfrag[site][frag][at]=rtfinfo[mol]['ATQ'][at]
             # get the total charge of each fragment at each site, the mean, and start to renormalize charge
@@ -360,8 +362,13 @@ def MsldCRN(mcsout,outdir,inFrag,AnCore,ChkQChange=True,verbose=False,debug=Fals
             orig_sitesum=deepcopy(sitesum)
             molQs = [rtfinfo[mol]['QNET'] == rtfinfo[refnum]['QNET'] for mol in range(len(mols))]
             if not all(molQs):
-                QQ=np.rint(sitesum) # round to nearest integer with numpy
-                QQ=[int(q) for q in QQ]
+                # [pyprep_update] one-site panels: use each fragment's exact molecular charge change. Rounding the
+                # fragment's partial-charge sum can pick the wrong integer and erase a real charge difference.
+                if nsites == 1:
+                    QQ=[int(round(float(rtfinfo[fragmol[f]]['QNET']) - float(rtfinfo[refnum]['QNET']))) for f in range(len(sitesum))]
+                else:
+                    QQ=np.rint(sitesum) # round to nearest integer with numpy
+                    QQ=[int(q) for q in QQ]
                 sitesum=[sitesum[q]-float(QQ[q]) for q in range(len(sitesum))]
                 # get majority Qint
                 Qint.append(float(str(np.around(np.rint(np.asarray(QQ).mean()),decimals=2))))

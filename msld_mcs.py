@@ -16,7 +16,7 @@ from copy import deepcopy
 
 
 
-def MsldMCS(molfile,mcsout,cutoff=0.8,debug=False):
+def MsldMCS(molfile,mcsout,cutoff=0.8,debug=False,refname=None):
     """
     Use bond-connectivity, atomtype definitions, and distance metrics to identify the
     core and fragment atoms for a set of supplied molecules.
@@ -828,6 +828,10 @@ def MsldMCS(molfile,mcsout,cutoff=0.8,debug=False):
                 minfragatoms=sumchk
                 refnum=m
     
+    # [pyprep_update] refname = name of the reference ligand (as in mol_list.txt); None keeps the automatic choice above
+    if refname is not None:
+        refnum=ms.index(refname)
+
     if debug:
         print("REFNUM =",refnum,"\n\n")
     
@@ -1015,11 +1019,106 @@ def MsldMCS(molfile,mcsout,cutoff=0.8,debug=False):
         
         if amatch != len(uflist):
             return False
-    
+
+        # [pyprep_update] same atoms and bonds -> also require the same stereochemistry
+        # (stereoisomers are otherwise always treated as the same fragment)
+        if stereo_ok and fragStereo(ufidx,ufkey) != fragStereo(qidx,qkey):
+            return False
+
         # else: they match
         return True
-    
-    
+
+
+    ## [pyprep_update] (7a) Stereochemistry from the 3D coordinates of each mol2 (needs RDKit).
+    ## A fragment is compared together with its anchor atom(s); the core atoms next to the
+    ## anchors are labelled by their position in the core, so labels mean the same thing in
+    ## every molecule. Two fragments are only "the same" if this labelled piece has the same
+    ## canonical isomeric SMILES (R/S and E/Z included).
+    try:
+        from rdkit import Chem, RDLogger
+        RDLogger.DisableLog('rdApp.*')
+        stereo_ok=True
+    except ImportError:
+        print("WARNING: RDKit not found - stereoisomers cannot be told apart (fragments compared by atom types only)")
+        stereo_ok=False
+
+    coreidx=[]  # coreidx[m][atomname] = 1-based position of that core atom in the reference core
+    for m in range(len(ms)):
+        coreidx.append({})
+        for i,k in enumerate(cores[refnum].keys()):
+            coreidx[m][k if m == refnum else cores[refnum][k][m][0]]=i+1
+
+    rdmols=[]
+    if stereo_ok:
+        for m in range(len(ms)):
+            mol=Chem.MolFromMol2File(ms[m]+'.mol2',removeHs=False)
+            if mol is None:
+                mol=Chem.MolFromMol2File(ms[m]+'.mol2',removeHs=False,sanitize=False)
+                if mol is not None:
+                    mol.UpdatePropertyCache(strict=False)
+                    Chem.FastFindRings(mol)
+            if mol is None or mol.GetNumConformers() == 0:
+                print("WARNING: RDKit could not read",ms[m]+'.mol2',"- stereoisomers cannot be told apart")
+                stereo_ok=False
+                break
+            Chem.AssignStereochemistryFrom3D(mol)
+            rdmols.append(mol)
+
+    def stereoSmiles(molnum,center,label):
+        """ canonical isomeric SMILES of the atoms in center (names), their hydrogens, and their other
+            heavy neighbours as dummy atoms; label(name) gives the isotope label of each dummy """
+        mol=Chem.RWMol(rdmols[molnum])
+        name2idx={}
+        for a in mol.GetAtoms():
+            name2idx[a.GetProp('_TriposAtomName')]=a.GetIdx()
+        keep=set(name2idx[n] for n in center)
+        for i in keep:  # core atoms in the center (anchors) keep their element, plus their core label
+            mol.GetAtomWithIdx(i).SetIsotope(label(mol.GetAtomWithIdx(i).GetProp('_TriposAtomName')))
+        dummies=set()
+        for i in list(keep):
+            for nb in mol.GetAtomWithIdx(i).GetNeighbors():
+                if nb.GetIdx() in keep: continue
+                if nb.GetAtomicNum() == 1: keep.add(nb.GetIdx())
+                else: dummies.add(nb.GetIdx())
+        for i in dummies:
+            a=mol.GetAtomWithIdx(i)
+            a.SetIsotope(label(a.GetProp('_TriposAtomName')))
+            a.SetAtomicNum(0); a.SetFormalCharge(0); a.SetNoImplicit(True); a.SetNumExplicitHs(0)
+            a.SetIsAromatic(False); a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+        for i in sorted(set(range(mol.GetNumAtoms()))-keep-dummies, reverse=True):
+            mol.RemoveAtom(i)
+        mol=mol.GetMol()
+        mol.UpdatePropertyCache(strict=False)
+        Chem.FastFindRings(mol)
+        Chem.AssignStereochemistry(mol,cleanIt=True,force=True)
+        return Chem.MolToSmiles(mol)
+
+    fragstereo={}
+    def fragStereo(molnum,key):
+        """ stereo fingerprint of a fragment + its anchor atom(s) """
+        if (molnum,key) not in fragstereo:
+            fragstereo[(molnum,key)]=stereoSmiles(molnum,Aatoms[molnum][key]+key.split('+'),
+                                                  lambda n: coreidx[molnum].get(n,0))
+        return fragstereo[(molnum,key)]
+
+    ## (7b) Core atoms whose neighbours are all core atoms are never compared above.
+    ## If such an atom is a stereocenter with different R/S in different molecules, warn.
+    if stereo_ok:
+        allanchors=set()
+        for m in range(len(ms)):
+            for key in Aatoms[m].keys():
+                for n in key.split('+'):
+                    allanchors.add(coreidx[m].get(n,0))
+        for i,k in enumerate(cores[refnum].keys()):
+            if i+1 in allanchors: continue
+            smis=[]
+            for m in range(len(ms)):
+                n=k if m == refnum else cores[refnum][k][m][0]
+                smis.append(stereoSmiles(m,[n],lambda nb,m=m: coreidx[m].get(nb,0)))
+            if len(set(smis)) > 1 and any('@' in s for s in smis):
+                print("WARNING: core atom",k,"("+ms[refnum]+") has different stereochemistry in different molecules.")
+                print("         Remove it (and the atoms beyond it) from the core so the stereoisomers become separate fragments.")
+
     UFrag = []  # list of Unique Fragment ms indices
     for site in range(nsites[refnum]):
         UFrag.append([refnum])

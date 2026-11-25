@@ -14,7 +14,7 @@ if [[ $cutoff == '' ]] ; then
 fi
 echo "Using a solvate cutoff of $cutoff"
 
-name=`more build*/name`
+name=`cat build*/name`   # [pyprep_update] more -> cat
 
 InDir=./build.${name}
 OutDir=solv_prep
@@ -27,7 +27,7 @@ convpdb.pl -solvate -cubic -cutoff $cutoff $InDir/$LgLig | grep TIP3 | convpdb.p
 
 convpdb.pl -solvate -cubic -cutoff $cutoff $InDir/$LgLig | grep LIG | convpdb.pl -segnames | sed "s/PRO0/LIG/g" > $OutDir/LgLig.pdb
 
-XYZ=`awk 'BEGIN {CC=0} {if ($1=="ATOM" && $2==1) {if (CC==0) {CC=1; X=$6; Y=$7; Z=$8} else {print X-$6,Y-$7,Z-$8}}}' $OutDir/LgLig.pdb $InDir/$LgLig`
+XYZ=`awk 'BEGIN {CC=0; done=0} {if (!done && $1=="ATOM" && $2==1) {if (CC==0) {CC=1; X=$6; Y=$7; Z=$8} else {print X-$6,Y-$7,Z-$8; done=1}}}' $OutDir/LgLig.pdb $InDir/$LgLig`
 
 echo $XYZ
 
